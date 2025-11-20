@@ -1,0 +1,13 @@
+streamlit
+pandas
+numpy
+scikit-learn
+spacy
+transformers
+torch
+plotly
+prophet
+beautifulsoup4
+requests
+python-dotenv
+openai
