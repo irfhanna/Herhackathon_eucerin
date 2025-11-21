@@ -11,3 +11,15 @@ beautifulsoup4
 requests
 python-dotenv
 openai
+playwright>=1.35.0
+beautifulsoup4>=4.12.2
+requests>=2.31.0
+tqdm>=4.65.0
+html5lib
+python-dateutil
+faiss-cpu==1.7.4
+openai==1.0.0
+tqdm
+python-dotenv
+neo4j
+
