@@ -83,7 +83,7 @@ def run_forecasting_pipeline(
     print("\n📊 Forecast Results:")
     print(forecast)
 
-    plot_trend(ts, forecast, concern_keyword)
+
 
     print("\n📌 Insight:")
     direction = "increasing 📈" if forecast.mean() > ts.mean() else "decreasing 📉"

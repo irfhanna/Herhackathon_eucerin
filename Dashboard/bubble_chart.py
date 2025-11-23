@@ -16,11 +16,15 @@ try:
     from Backend import improvised_rag
 except Exception:
     improvised_rag = None
+try:
+    from Backend import forecast
+except Exception:
+    forecast = None
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QLabel,
-    QPushButton, QStackedWidget
+    QPushButton, QStackedWidget, QHBoxLayout, QSlider, QSpinBox
 )
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QThread, pyqtSignal, Qt
 
 
 class AnalysisWorker(QThread):
@@ -120,6 +124,73 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import matplotlib.pyplot as plt
 
 
+class ForecastWorker(QThread):
+    """Background worker to run forecast analysis without blocking UI.
+    
+    Emits a dict payload via the `finished` signal when done.
+    """
+    finished = pyqtSignal(dict)
+
+    def __init__(self, ngram: str):
+        super().__init__()
+        self.ngram = ngram
+
+    def run(self):
+        payload = {}
+        try:
+            if forecast is None:
+                payload['error'] = 'forecast module unavailable.'
+                self.finished.emit(payload)
+                return
+
+            # Try to load data and run forecast
+            try:
+                csv_path = str(REPO_ROOT / 'skin_social_media_data.csv')
+                ts, forecast_result = forecast.run_forecasting_pipeline(
+                    csv_path=csv_path,
+                    concern_keyword=str(self.ngram),
+                    forecast_days=15
+                )
+                
+                # Prepare forecast chart as matplotlib figure
+                fig, ax = plt.subplots(figsize=(12, 6))
+                ax.plot(ts.index, ts.values, label="Historical Data", linewidth=2)
+                ax.plot(forecast_result.index, forecast_result.values, label="Forecast", linestyle="--", linewidth=2)
+                ax.set_title(f"Trend Forecast for '{self.ngram}' Mentions")
+                ax.set_xlabel("Date")
+                ax.set_ylabel("Frequency")
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                fig.tight_layout()
+
+                # Generate insight with quantified metrics
+                current_avg = ts.mean()
+                forecast_avg = forecast_result.mean()
+                percent_change = ((forecast_avg - current_avg) / current_avg * 100) if current_avg > 0 else 0
+                
+                direction = "increase 📈" if percent_change > 0 else "decrease 📉"
+                insight = f"Predicted to {direction} from {current_avg:.2f} to {forecast_avg:.2f} mentions per day (~{abs(percent_change):.1f}% change over next 15 days)."
+                
+                payload['figure'] = fig
+                payload['insight'] = insight
+                payload['forecast_data'] = {
+                    'ts': ts,
+                    'forecast': forecast_result,
+                    'concern': self.ngram
+                }
+                
+            except Exception as e:
+                payload['error'] = f'Error running forecast: {e}'
+                self.finished.emit(payload)
+                return
+
+            self.finished.emit(payload)
+
+        except Exception as e:
+            payload['error'] = f'Unhandled forecast worker error: {e}'
+            self.finished.emit(payload)
+
+
 # -------------------------------
 # Page 1: Bubble Chart Page
 # -------------------------------
@@ -158,26 +229,32 @@ class BubbleChartPage(QWidget):
         except Exception as e:
             print(f"Warning: Could not save n-grams to file: {e}")
 
+        # Control panel for number of entities to display
+        control_layout = QHBoxLayout()
+        control_label = QLabel("Number of n-grams to display:")
+        control_label.setStyleSheet("font-size: 12px;")
+        control_layout.addWidget(control_label)
+
+        self.ngram_count_spinbox = QSpinBox()
+        self.ngram_count_spinbox.setMinimum(5)
+        self.ngram_count_spinbox.setMaximum(len(self.df))
+        self.ngram_count_spinbox.setValue(min(20, len(self.df)))
+        self.ngram_count_spinbox.setStyleSheet("padding: 5px; font-size: 11px;")
+        control_layout.addWidget(self.ngram_count_spinbox)
+        control_layout.addStretch(1)
+
+        layout.addLayout(control_layout)
+
         # Create figure and canvas
         self.fig, self.ax = plt.subplots(figsize=(12, 6))
         self.canvas = FigureCanvas(self.fig)
         layout.addWidget(self.canvas)
 
-        # Draw bubbles
-        self.scat = self.ax.scatter(
-            self.df['ngram'],
-            self.df['count'],
-            s=self.df['count'] * 4,
-            c=self.df['count'],
-            cmap='viridis',
-            alpha=0.7,
-            edgecolors='white'
-        )
-        self.ax.set_xlabel('N-gram')
-        self.ax.set_ylabel('Count')
-        self.ax.set_title('N-gram Analysis Bubble Chart')
-        self.fig.tight_layout()
-        self.canvas.draw()
+        # Draw bubbles (initial view)
+        self.update_bubble_chart()
+
+        # Connect spinbox to update chart
+        self.ngram_count_spinbox.valueChanged.connect(self.update_bubble_chart)
 
         # Connect click event
         self.canvas.mpl_connect('button_press_event', self.on_click)
@@ -192,12 +269,12 @@ class BubbleChartPage(QWidget):
         if event.inaxes != self.ax:
             return
 
-        # Find nearest point
-        distances = ((self.df['ngram'].map(str).apply(hash) - hash(str(event.xdata)))**2 +
-                     (self.df['count'] - event.ydata)**2)
+        # Find nearest point from the current (filtered) dataframe
+        distances = ((self.current_df['ngram'].map(str).apply(hash) - hash(str(event.xdata)))**2 +
+                     (self.current_df['count'] - event.ydata)**2)
         idx = distances.idxmin()
-        ngram = self.df.iloc[idx]['ngram']
-        count = self.df.iloc[idx]['count']
+        ngram = self.current_df.iloc[idx]['ngram']
+        count = self.current_df.iloc[idx]['count']
         self.selected_label.setText(f"{ngram} (Count: {count})")
         # store selection on the page and on the main window so other pages can access it
         self.selected_ngram = ngram
@@ -205,6 +282,31 @@ class BubbleChartPage(QWidget):
             self.parent.selected_ngram = ngram
         except Exception:
             self.parent.selected_ngram = ngram
+
+    def update_bubble_chart(self):
+        """Update the bubble chart based on the selected number of n-grams."""
+        num_ngrams = self.ngram_count_spinbox.value()
+        # Sort by count (descending) and take top N
+        self.current_df = self.df.nlargest(num_ngrams, 'count').reset_index(drop=True)
+
+        # Clear previous plot
+        self.ax.clear()
+
+        # Draw bubbles
+        self.scat = self.ax.scatter(
+            self.current_df['ngram'],
+            self.current_df['count'],
+            s=self.current_df['count'] * 4,
+            c=self.current_df['count'],
+            cmap='viridis',
+            alpha=0.7,
+            edgecolors='white'
+        )
+        self.ax.set_xlabel('N-gram')
+        self.ax.set_ylabel('Count')
+        self.ax.set_title(f'N-gram Analysis Bubble Chart (Top {num_ngrams})')
+        self.fig.tight_layout()
+        self.canvas.draw()
 
     def go_next(self):
         # pass selected n-gram to second page before switching
@@ -215,7 +317,7 @@ class BubbleChartPage(QWidget):
             except Exception as e:
                 print(f"Error updating concerns page: {e}")
 
-        self.parent.setCurrentIndex(1)  # Switch to page index 1
+        self.parent.setCurrentIndex(1)  # Switch to page index 1 (Concerns)
 
 
 class SecondPage(QWidget):
@@ -271,6 +373,12 @@ class SecondPage(QWidget):
         next_btn.clicked.connect(self.go_third)
         layout.addWidget(next_btn)
 
+        # Forecast button to go to the forecast page
+        forecast_btn = QPushButton("View Forecast")
+        forecast_btn.setStyleSheet("padding: 10px; font-size: 14px;")
+        forecast_btn.clicked.connect(self.go_forecast)
+        layout.addWidget(forecast_btn)
+
     def go_back(self):
         self.parent.setCurrentIndex(0)
         self.parent.adjustSize()
@@ -279,6 +387,20 @@ class SecondPage(QWidget):
         # Navigate to the third page (What Eucerin Can Do)
         try:
             self.parent.setCurrentIndex(2)
+        except Exception:
+            pass
+
+    def go_forecast(self):
+        # Navigate to the forecast page
+        selected = getattr(self.parent, 'selected_ngram', None)
+        if selected is not None and hasattr(self.parent, 'page4'):
+            try:
+                self.parent.page4.start_forecast(selected)
+            except Exception as e:
+                print(f"Error starting forecast: {e}")
+
+        try:
+            self.parent.setCurrentIndex(3)  # Switch to page index 3 (Forecast)
         except Exception:
             pass
 
@@ -399,6 +521,102 @@ class ThirdPage(QWidget):
         self.marketing_label.setText("Marketing:\n\n" + rag_sections.get('marketing', ''))
 
 
+class ForecastPage(QWidget):
+    def __init__(self, parent):
+        super().__init__()
+        self.parent = parent
+
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+
+        # Title
+        title = QLabel("Trend Forecast")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; padding: 10px;")
+        title.setMinimumHeight(40)
+        layout.addWidget(title)
+
+        # Status / loading label
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("font-size: 14px; padding: 4px; color: #555;")
+        layout.addWidget(self.status_label)
+
+        # Chart area
+        self.chart_canvas = None
+
+        # Insight label
+        self.insight_label = QLabel("Forecast insight will appear here...")
+        self.insight_label.setStyleSheet("font-size: 14px; padding: 10px; color: #333;")
+        self.insight_label.setWordWrap(True)
+        self.insight_label.setMinimumHeight(80)
+        layout.addWidget(self.insight_label)
+
+        # Add stretch
+        layout.addStretch(1)
+
+        # Back button
+        back_btn = QPushButton("Back to Bubble Chart")
+        back_btn.setStyleSheet("padding: 10px; font-size: 14px;")
+        back_btn.clicked.connect(self.go_back)
+        layout.addWidget(back_btn)
+
+    def go_back(self):
+        try:
+            self.parent.setCurrentIndex(0)
+        except Exception:
+            pass
+
+    def start_forecast(self, ngram):
+        """Start background forecast worker."""
+        if not ngram:
+            return
+
+        try:
+            self.status_label.setText(f"Forecasting trend for '{ngram}' ...")
+        except Exception:
+            pass
+
+        if forecast is None:
+            self.insight_label.setText("Forecast module unavailable.")
+            self.status_label.setText("")
+            return
+
+        worker = ForecastWorker(ngram)
+        worker.finished.connect(self._on_forecast_finished)
+        worker.start()
+        self._worker = worker
+
+    def _on_forecast_finished(self, payload):
+        """Handle results from ForecastWorker."""
+        try:
+            self.status_label.setText("")
+        except Exception:
+            pass
+
+        if not payload:
+            self.insight_label.setText("No forecast results returned.")
+            return
+
+        if payload.get('error'):
+            self.insight_label.setText(f"Error: {payload.get('error')}")
+            return
+
+        # Remove old chart if present
+        if self.chart_canvas is not None:
+            self.layout().removeWidget(self.chart_canvas)
+            self.chart_canvas.deleteLater()
+            self.chart_canvas = None
+
+        # Add new chart
+        fig = payload.get('figure')
+        if fig:
+            self.chart_canvas = FigureCanvas(fig)
+            self.layout().insertWidget(2, self.chart_canvas)  # Insert after status label
+
+        # Update insight
+        insight = payload.get('insight', '')
+        self.insight_label.setText(insight)
+
+
 # -------------------------------
 # Main Stacked Window
 # -------------------------------
@@ -409,10 +627,12 @@ class MainWindow(QStackedWidget):
         self.page1 = BubbleChartPage(self)
         self.page2 = SecondPage(self)
         self.page3 = ThirdPage(self)
+        self.page4 = ForecastPage(self)
 
         self.addWidget(self.page1)
         self.addWidget(self.page2)
         self.addWidget(self.page3)
+        self.addWidget(self.page4)
 
 
 # -------------------------------
