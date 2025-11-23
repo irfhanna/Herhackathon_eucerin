@@ -1,8 +1,5 @@
 import ollama
 from neo4j import GraphDatabase
-NEO4J_URI = "neo4j+s://c2bc1beb.databases.neo4j.io"
-NEO4J_USER = "neo4j"
-NEO4J_PASS = "GFqr9m7JiZLyVWCcRhcMAY6ut2YhZX1uC9X0X6IGp9o"   
 
 
 # --- Neo4j Driver ---
