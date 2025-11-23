@@ -124,9 +124,7 @@ def main():
 
     CSV_PATH = "./skin_social_media_data.csv"   # ← your CSV file
     TEXT_COLUMN = "clean_text"
-    NEO4J_URI = "neo4j+s://c2bc1beb.databases.neo4j.io"
-    NEO4J_USER = "neo4j"
-    NEO4J_PASS = "GFqr9m7JiZLyVWCcRhcMAY6ut2YhZX1uC9X0X6IGp9o"   
+
 
     print("Building knowledge graph from CSV...")
     graph = build_graph_from_csv(CSV_PATH, TEXT_COLUMN)
